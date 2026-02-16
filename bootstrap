@@ -1,0 +1,233 @@
+#!/bin/sh -e
+
+set +h
+export MAKEFLAGS="j$(nproc)"
+
+# build cross-compiler using mussel
+cd $LFS/mussel
+./mussel --clean
+./mussel $LFS_MCA -p
+cd $LFS
+
+# use the new toolchain
+export CC=$LFS_TARGET-gcc
+export CXX=$LFS_TARGET-g++
+export AR=$LFS_TARGET-ar
+export AS=$LFS_TARGET-as
+export LD=$LFS_TARGET-ld
+export RAINLIB=$LFS_TARGET-ranlib
+export READELF=$LFS_TARGET-readelf
+export STRIP=$LFS_TARGET-strip
+
+#####
+# create target directory structure
+mkdir -pv $SYSROOT/{bin,boot,etc,home,lib/{firmware,modules},include}
+mkdir -pv $SYSROOT/{mnt,dev,proc,sys,run,tmp}
+mkdir -pv $SYSROOT/var/{cache,lib,local,lock,log,mnt,opt,spool}
+install -dv -m 0750 $SYSROOT/home/root
+install -dv -m 1777 $SYSROOT/{var/,}tmp
+
+# opinionated linking
+ln -sv ./bin $SYSROOT/sbin
+ln -sv . $SYSROOT/usr
+ln -sv ../run $SYSROOT/var/run
+ln -sv ../proc/mounts $SYSROOT/etc/mtab
+
+# base files
+
+# TODO: finish this...
+
+touch $SYSROOT/var/log/lastlog
+chmod -v 664 $SYSROOT/var/log/lastlog
+
+#####
+# download sources
+mkdir -pv $SOURCES
+cd $SOURCES
+wget -nc -O config.guess 'https://git.savannah.gnu.org/gitweb/?p=config.git;a=blob_plain;f=config.guess;hb=HEAD'
+chmod +x config.guess
+
+wget -nc https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.10.tar.xz
+wget -nc https://ftp.gnu.org/gnu/m4/m4-1.4.21.tar.xz
+wget -nc https://ftp.gnu.org/gnu/binutils/binutils-2.46.0.tar.xz
+wget -nc https://ftp.gnu.org/gnu/make/make-4.4.tar.gz
+wget -nc https://busybox.net/downloads/busybox-1.37.0.tar.bz2
+wget -nc https://github.com/venomlinux/scratchpkg/archive/refs/tags/20200729.tar.gz
+
+#####
+## linux-headers
+cd $SOURCES
+tar xf linux-6.18.10.tar.xz
+cd linux-6.18.10
+
+make mrproper
+make headers && make INSTALL_HDR_PATH=$SYSROOT/usr headers_install
+# Add to the musl toolchain...
+make INSTALL_HDR_PATH=/toolchain headers_install
+
+#####
+## musl
+cd $SOURCES
+cp $LFS/mussel/sources/musl/musl-1.2.5.tar.gz .
+tar xf musl-1.2.5.tar.gz
+cd musl-1.2.5
+
+./configure \
+  CROSS_COMPILE=$LFS_TARGET- \
+  --prefix="/usr" \
+  --syslibdir="/lib" \
+  --disable-static \
+  --target=$LFS_TARGET
+  
+make && make DESTDIR=$SYSROOT install
+
+#####
+## m4
+cd $SOURCES
+tar xf m4-1.4.21.tar.xz
+cd m4-1.4.21
+
+./configure \
+  --prefix="/usr" \
+  --host=$LFS_TARGET \
+  --build="$($SOURCES/config.guess)"
+  
+make && make DESTDIR=$SYSROOT install
+
+#####
+## binutils
+cd $SOURCES
+tar xf binutils-2.46.0.tar.xz
+cd binutils-2.46.0
+
+mkdir -pv build
+cd build
+
+../configure \
+    --prefix="" \
+    --exec-prefix="" \
+    --sbindir=/bin \
+    --libexecdir=/lib \
+    --with-lib-path=/lib \
+    --build=x86_64 \
+    --host=$LFS_TARGET \
+    --target=$LFS_TARGET \
+    --with-sysroot=$SYSROOT \
+    --enable-deterministic-archives \
+    --enable-gold \
+    --enable-lto \
+    --enable-ld=default \
+    --enable-plugins \
+    --disable-multilib \
+    --disable-werror \
+    --disable-gdb \
+    --disable-nls \
+    --disable-readline \
+    --disable-gprof \
+    --disable-gprofng \
+    --with-mmap \
+    --without-zstd
+
+make && make DESTDIR=$SYSROOT install
+
+#####
+## gcc
+cd $SOURCES
+cp $LFS/mussel/sources/gcc/gcc-15.2.0.tar.xz .
+cp $LFS/mussel/sources/mpfr/mpfr-4.2.2.tar.xz .
+cp $LFS/mussel/sources/gmp/gmp-6.3.0.tar.xz .
+cp $LFS/mussel/sources/mpc/mpc-1.3.1.tar.gz .
+tar xf gcc-15.2.0.tar.xz
+cd gcc-15.2.0
+
+tar xf ../mpfr-4.2.2.tar.xz
+mv -v mpfr-4.2.2 mpfr
+tar xf ../gmp-6.3.0.tar.xz
+mv -v gmp-6.3.0 gmp
+tar xf ../mpc-1.3.1.tar.gz
+mv -v mpc-1.3.1 mpc
+
+# Make it all lib...
+sed '/m64=/s/lib64/lib/' gcc/config/i386/t-linux64 > _
+mv -f _ gcc/config/i386/t-linux64
+sed 's/lib64/lib/' gcc/config/i386/linux64.h > _
+mv -f _ gcc/config/i386/linux64.h
+
+mkdir -pv build
+cd build
+
+../configure \
+    --with-sysroot=$SYSROOT \
+    --prefix="" \
+    --exec-prefix="" \
+    --sbindir=/bin \
+    --libexecdir=/lib \
+    --mandir=/share/man \
+    --infodir=/share/info \
+    --build=x86_64 \
+    --host=$LFS_TARGET \
+    --target=$LFS_TARGET \
+    --disable-nls \
+    --enable-languages=c,c++ \
+    --enable-c99 \
+    --enable-long-long \
+    --disable-libmudflap \
+    --disable-multilib \
+    --disable-libsanitizer \
+    --with-mpfr-include=$(pwd)/../mpfr/src \
+    --with-mpfr-lib=$(pwd)/mpfr/src/.libs \
+    --disable-werror \
+    --with-arch=x86-64 \
+    --with-tune=generic
+  
+make && make DESTDIR=$SYSROOT install
+
+#####
+## make
+cd $SOURCES
+tar xf make-4.4.tar.gz
+cd make-4.4
+
+# we need this patch for gcc 15 ...
+patch -p1 < $LFS/patches/make/getopt-gcc15.patch
+
+./configure \
+    --prefix="" \
+    --host=$LFS_TARGET \
+    --build="$($SOURCES/config.guess)" \
+    --disable-nls
+
+make && make DESTDIR=$SYSROOT install
+
+#####
+## busybox
+cd $SOURCES
+tar xf busybox-1.37.0.tar.bz2
+cd busybox-1.37.0
+
+make distclean
+make defconfig
+
+sed -i 's/\(CONFIG_\)\(.*\)\(INETD\)\(.*\)=y/# \1\2\3\4 is not set/g' .config
+sed -i 's/\(CONFIG_IFPLUGD\)=y/# \1 is not set/' .config
+sed -i 's/\(CONFIG_FEATURE_WTMP\)=y/# \1 is not set/' .config
+sed -i 's/\(CONFIG_FEATURE_UTMP\)=y/# \1 is not set/' .config
+sed -i 's/\(CONFIG_UDPSVD\)=y/# \1 is not set/' .config
+sed -i 's/\(CONFIG_TCPSVD\)=y/# \1 is not set/' .config
+sed -i 's/\(CONFIG_TC\)=y/# \1 is not set/' .config
+
+make CROSS_COMPILE=$LFS_TARGET-
+make CROSS_COMPILE=$LFS_TARGET- CONFIG_PREFIX=$SYSROOT install
+
+cp -v examples/depmod.pl $SYSROOT/bin
+chmod -v 755 $SYSROOT/bin/depmod.pl
+
+#####
+## scratchpkg
+cd $SOURCES
+tar xf 20200729.tar.gz
+cd scratchpkg-20200729
+
+DESTDIR=$SYSROOT ./INSTALL.sh
+
+echo "Done!"

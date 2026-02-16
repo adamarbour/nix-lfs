@@ -1,0 +1,8 @@
+#!/bin/sh -e
+
+$LFS/mussel/mussel --clean
+rm -rf $LFS/mussel/builds
+rm -rf $LFS/mussel/toolchain
+
+rm -rf $LFS/sources
+rm -rf $LFS/sysroot
